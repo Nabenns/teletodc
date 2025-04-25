@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+venv/
+.venv/
+
+# Telethon session files
+*.session
+*.session-journal
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Cursor specific
+.cursorrules 

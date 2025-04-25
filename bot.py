@@ -110,50 +110,116 @@ class TelegramForwarder:
                     "from_username": sender.username if sender else None,
                     "text": message.text,
                     "date": message.date.isoformat(),
-                    "content": message.text,
                     "username": sender.username if sender else "Unknown",
                     "avatar_url": f"https://cdn.discordapp.com/embed/avatars/{sender.id % 5}.png" if sender else None,
                 }
+
+                # Handle media (images, videos, etc.)
+                if message.media:
+                    try:
+                        # Download the media file
+                        file_path = await message.download_media(file="downloads/")
+                        logger.info(f"📥 Media downloaded to {file_path}")
+                        
+                        # For Discord webhooks
+                        if 'discord' in webhook_url.lower():
+                            message_data["file"] = file_path
+                            if message.text:
+                                message_data["content"] = message.text
+                            else:
+                                message_data["content"] = ""  # Discord requires content field
+                    except Exception as e:
+                        logger.error(f"❌ Error handling media: {str(e)}")
+                        logger.exception(e)
+                        return
                 
                 await self.forward_to_webhook(webhook_url, message_data)
+                
+                # Clean up downloaded media
+                if message.media and 'file_path' in locals():
+                    try:
+                        os.remove(file_path)
+                        logger.debug(f"🗑️ Deleted temporary media file: {file_path}")
+                    except Exception as e:
+                        logger.error(f"❌ Error deleting media file: {str(e)}")
                 
             except Exception as e:
                 logger.error(f"❌ Error saat memproses pesan: {str(e)}")
                 logger.exception(e)
     
-    async def forward_to_webhook(self, webhook_url: str, data: dict):
-        """Forward message data to webhook."""
+    async def forward_to_webhook(self, webhook_url: str, message_data: dict):
+        """Forward message to webhook."""
+        file_handle = None
         try:
-            logger.info(f"📤 Mengirim pesan ke webhook...")
-            logger.debug(f"📝 Data yang dikirim: {json.dumps(data, indent=2)}")
-            
             if 'discord' in webhook_url.lower():
+                # Prepare Discord webhook data with embed
                 webhook_data = {
-                    "content": data["text"],
-                    "username": data.get("username", "Telegram"),
-                    "avatar_url": data.get("avatar_url"),
+                    "username": message_data.get("username", "Unknown"),
+                    "avatar_url": message_data.get("avatar_url"),
+                    "embeds": [{
+                        "description": message_data.get("text", ""),
+                        "color": 3447003,  # Blue color
+                        "author": {
+                            "name": message_data.get("username", "Unknown"),
+                            "icon_url": message_data.get("avatar_url")
+                        },
+                        "timestamp": message_data.get("date")
+                    }]
                 }
-            elif 'slack' in webhook_url.lower():
-                webhook_data = {
-                    "text": data["text"],
-                    "username": data.get("username", "Telegram"),
-                }
-            else:
-                webhook_data = data
-            
-            logger.debug(f"📝 Data yang diformat: {json.dumps(webhook_data, indent=2)}")
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(webhook_url, json=webhook_data) as response:
-                    if response.status in [200, 204]:
-                        logger.info(f"✅ Pesan berhasil dikirim ke webhook!")
+
+                # If there's a file, add it to the embed as an image
+                if "file" in message_data:
+                    webhook_data["embeds"][0]["image"] = {
+                        "url": "attachment://image.jpg"  # This will reference the uploaded file
+                    }
+
+                # Send to Discord webhook
+                async with aiohttp.ClientSession() as session:
+                    if "file" in message_data:
+                        # Send with media
+                        try:
+                            file_handle = open(message_data["file"], "rb")
+                            form = aiohttp.FormData()
+                            form.add_field("payload_json", json.dumps(webhook_data))
+                            form.add_field("file", file_handle, filename="image.jpg")
+                            async with session.post(webhook_url, data=form) as response:
+                                if response.status not in [200, 204]:
+                                    logger.error(f"❌ Discord webhook error: {response.status}")
+                                    logger.error(await response.text())
+                        finally:
+                            if file_handle:
+                                file_handle.close()
                     else:
-                        response_text = await response.text()
-                        logger.error(f"❌ Gagal mengirim ke webhook: Status {response.status}")
-                        logger.error(f"Response: {response_text}")
+                        # Send text only
+                        async with session.post(webhook_url, json=webhook_data) as response:
+                            if response.status not in [200, 204]:
+                                logger.error(f"❌ Discord webhook error: {response.status}")
+                                logger.error(await response.text())
+
+            else:
+                # Default webhook format (e.g., for Slack)
+                webhook_data = {
+                    "text": message_data.get("text", ""),
+                    "username": message_data.get("username", "Unknown"),
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(webhook_url, json=webhook_data) as response:
+                        if response.status not in [200, 204]:
+                            logger.error(f"❌ Webhook error: {response.status}")
+                            logger.error(await response.text())
+
+            logger.info(f"✅ Message forwarded to webhook successfully")
+
         except Exception as e:
-            logger.error(f"❌ Error saat mengirim ke webhook: {str(e)}")
+            logger.error(f"❌ Error forwarding to webhook: {str(e)}")
             logger.exception(e)
+        finally:
+            if file_handle:
+                try:
+                    file_handle.close()
+                except:
+                    pass
     
     async def add_configuration(self, group_id: int, group_name: str, topic_id: int, 
                               topic_name: str, webhook_url: str, description: str = None):
